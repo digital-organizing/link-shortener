@@ -23,162 +23,33 @@ that both the domain and your user belong to.
 
 ## Deployment
 
-```
-docker compose -f docker-compose.prod.yml up -d
-docker compose -f docker-compose.prod.yml exec web python manage.py migrate
-docker compose -f docker-compose.prod.yml exec web python manage.py collectstatic --no-input
-docker compose -f docker-compose.prod.yml exec web python manage.py createsuperuser
-```
+Every push to `master` is tested, built into
+`ghcr.io/digital-organizing/link-shortener` and deployed to the organisation's
+app platform, where the app runs as `link-shortener-prod` on the host
+`app-daily`. The deploy job joins the tailnet, logs in to the app host through
+Tailscale SSH and hands over `compose.deploy.yml`; it needs the repository
+secrets `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` and no SSH key. The
+platform runs `python manage.py migrate` before it switches to the new image.
 
-For production copy .env.dev to .env.prod and change passwords and keys.
-Change traefik labels to fit domain.
+What the app gets on the server is decided in the `digital-organizing/infra`
+repository, not here: `apps/link-shortener.yml` (the domains it answers on,
+its budget, the settings that are not secret) and
+`secrets/daily/link-shortener.prod.yaml` (`SECRET_KEY`, the database
+password). The database arrives as one variable, `DATABASE_URL`.
 
-Once the service is behind TLS, switch the security settings on in `.env.prod`:
+The app is one container. It serves its static files itself (WhiteNoise;
+they are collected into the image at build time) and the uploaded preview
+images from the `media` volume. There is no web server in front of it besides
+the platform's proxy. `compose.deploy.yml` must not publish a port and must
+keep the service name `app`.
 
-```
-SESSION_COOKIE_SECURE=1
-CSRF_COOKIE_SECURE=1
-USE_X_FORWARDED_PROTO=1
-SECURE_HSTS_SECONDS=31536000
-```
-
-## CI / images
-
-`.github/workflows/ci.yml` runs the test suite against PostgreSQL on every push
-and pull request, and — once tests pass — builds `Dockerfile.prod` and pushes it
-to `ghcr.io/sacovo/link-shortener`. Pull requests build the image but do not push
-it. No secrets to configure: the workflow signs in with the automatic
-`GITHUB_TOKEN`.
-
-Tags produced:
-
-| Trigger | Tag |
-| --- | --- |
-| push to `master` | `latest`, `master`, `sha-<commit>` |
-| push of tag `v1.2.3` | `1.2.3`, `1.2`, `1`, `sha-<commit>` |
-
-So cutting a release is `git tag v1.2.3 && git push --tags`.
-
-The first push creates the GHCR package as **private**. To pull it on a server
-without credentials, open the package on GitHub → *Package settings* → *Change
-visibility* → Public. Otherwise `docker login ghcr.io` with a token that has
-`read:packages` on the host.
-
-Images are `linux/amd64`. For arm64 too, add it to `platforms` in the workflow —
-the QEMU setup step is already there. Cross-builds under emulation are
-noticeably slower.
-
-## API
-
-The API lives under `/api/v1/` and is meant for automation.
-
-| Endpoint | Description |
-| --- | --- |
-| `GET/POST /api/v1/links/` | List and create short links |
-| `GET/PUT/PATCH/DELETE /api/v1/links/{id}/` | Read and change a single link |
-| `POST /api/v1/links/{id}/refresh-metadata/` | Re-scrape the target's open graph tags |
-| `GET/POST /api/v1/shares/` | List shares, create a share with one short link per platform |
-| `GET/PUT/PATCH/DELETE /api/v1/shares/{id}/` | Read and change a share; changing the text rewrites its links |
-| `POST /api/v1/shares/preview/` | Generate the share URLs (`wa.me/?text=…` etc.) without storing anything |
-| `GET /api/v1/domains/` | Domains you may create links on |
-| `GET /api/v1/groups/` | Groups you may file links under |
-| `GET /api/v1/whoami/` | What the key you are using can reach |
-| `GET /api/v1/schema/` | OpenAPI 3 schema |
-| `GET /api/v1/docs/` | Swagger UI (also `/api/v1/redoc/`) |
-
-### Authentication
-
-Create a key under *API keys* in the admin. The secret is shown **once**, right
-after saving — store it then, it is only kept hashed. Keys belong to a user and
-can only reach what that user can reach; they can be given an expiry date and
-revoked at any time.
-
-```
-curl -H "Authorization: Api-Key <prefix>.<secret>" https://example.com/api/v1/whoami/
-```
-
-### Creating a link
-
-`domain` and `group` are addressed by name, not by id. `slug` is optional; leave
-it out and a random one is generated. Unless you pass `"fetch_metadata": false`,
-the target is scraped for open graph tags and anything you did not set yourself
-is filled in from it.
-
-```
-curl -X POST https://example.com/api/v1/links/ \
-  -H "Authorization: Api-Key <prefix>.<secret>" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "target": "https://example.org/a-long-url",
-        "domain": "example.com",
-        "group": "marketing",
-        "slug": "launch"
-      }'
-```
-
-```json
-{
-  "id": 1,
-  "slug": "launch",
-  "short_url": "https://example.com/launch/",
-  "target": "https://example.org/a-long-url",
-  "views": 0,
-  "...": "the scraped og_* and twitter_* fields"
-}
-```
-
-### Sharing a text
-
-A share makes one short link per platform, each redirecting to that platform's
-share URL. Slugs are random, behind `slug_prefix` if you give one. `url` is
-optional, except for Facebook and LinkedIn, which can only share a link.
-Platforms: `whatsapp`, `telegram`, `x`, `bluesky`, `threads`, `facebook`,
-`linkedin`, `email`, `sms`.
-
-```
-curl -X POST https://example.com/api/v1/shares/ \
-  -H "Authorization: Api-Key <prefix>.<secret>" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "text": "Sign the petition!",
-        "url": "https://example.org/petition",
-        "platforms": ["whatsapp", "telegram"],
-        "slug_prefix": "my-campaign",
-        "domain": "example.com",
-        "group": "campaigns"
-      }'
-```
-
-The response lists the `links` and a `short_urls` map from platform to short
-URL, e.g. `"whatsapp": "https://example.com/my-campaign-x3k9qa/"`. WhatsApp links
-send desktop browsers to WhatsApp Web instead of `wa.me`. `PATCH`ing `text` or
-`url` rewrites every link of the share; `platforms` and `slug_prefix` can only be
-set on create. `POST /api/v1/shares/preview/` takes `text`, `url` and optionally
-`platforms` and only returns the share URLs.
-
-### Listing and filtering
-
-Results are paginated (`limit`/`offset`). Filters: `domain`, `group`, `slug`,
-`target`, `custom_tags`, `created_after`, `created_before`; plus `search=` over
-slug, title and target and `ordering=` over `created_at`, `views`, `slug`.
-
-```
-curl -H "Authorization: Api-Key <prefix>.<secret>" \
-  "https://example.com/api/v1/links/?domain=example.com&ordering=-views"
-```
-
-View counts are also readable without a key, per link, at
-`https://<domain>/<slug>/count/`.
-
-## Structure
-
-Configuration is in the top-directory: `settings.py`, `urls.py`
+To add a domain the shortener answers on: add it to the app file in the infra
+repository, and create the Domain object in the admin.
 
 - `shortener/` — models, the redirect/preview views and the admin
 - `shortener/metadata.py` — the open graph scraper, shared by the admin and the API
 - `api/` — REST API, the user-bound API key model and its admin
 
-docker-compose.prod.yml is prepared for use with the traefik load balancer.
 
 ## Tests
 

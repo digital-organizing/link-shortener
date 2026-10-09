@@ -1,0 +1,22 @@
+# How the link shortener runs on the organisation's app platform.
+#
+# The platform lays its own settings over this file at every deploy: the env
+# file (with DATABASE_URL for the shared PostgreSQL server) and the proxy
+# network for the service "app", and the app's memory and CPU budget. They are
+# decided in the infra repository, apps/link-shortener.yml and
+# secrets/daily/link-shortener.prod.yaml; a setting is changed there, not
+# here. The platform runs the migrations before it switches to a new image.
+#
+# This file must not publish a port, and the service must be called "app":
+# Caddy on the app host sends requests for the shortener's domains to its port
+# 8000. docker-compose.yml next to it is for development.
+services:
+  app:
+    image: ghcr.io/digital-organizing/link-shortener:master
+    command: gunicorn -w 2 -k uvicorn.workers.UvicornH11Worker asgi:application --bind 0.0.0.0:8000
+    volumes:
+      # Uploaded preview images.
+      - media:/home/app/web/storage/media/
+
+volumes:
+  media:

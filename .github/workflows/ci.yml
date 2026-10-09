@@ -116,3 +116,44 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Hands compose.deploy.yml to the organisation's app platform: the job joins
+  # the tailnet and logs in to the app host through Tailscale SSH, so this
+  # repository holds no SSH key. The platform runs the migrations before it
+  # switches to the new image.
+  #
+  # These are the steps of the shared workflow
+  # digital-organizing/infra/.github/workflows/deploy.yml, copied here: that
+  # repository is private and this one is public, and a public repository
+  # cannot call a workflow of a private one. Keep the two the same.
+  deploy:
+    needs: publish
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-link-shortener-prod
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Join the tailnet as a CI node
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-daily
+
+      - name: Deploy
+        env:
+          APP: link-shortener-prod
+          HOST: app-daily
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          address=$(tailscale ip -4 "$HOST")
+          run() { ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 "deploy@$address" "$@"; }
+          printf '%s' "$REGISTRY_TOKEN" | run "registry-login ghcr.io $REGISTRY_USER"
+          run "deploy $APP" < compose.deploy.yml

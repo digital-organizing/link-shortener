@@ -16,3 +16,6 @@ drf-spectacular-sidecar
 
 # Admin
 django-unfold~=0.106
+
+# Static files without a web server in front
+whitenoise~=6.9
