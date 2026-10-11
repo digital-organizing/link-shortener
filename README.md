@@ -27,12 +27,14 @@ Every push to `master` is tested, built into
 `ghcr.io/digital-organizing/link-shortener` and deployed to the organisation's
 app platform, where the app runs as `link-shortener-prod` on the host
 `app-daily`. The deploy job joins the tailnet, logs in to the app host through
-Tailscale SSH and hands over `compose.deploy.yml`; it needs the repository
+Tailscale SSH and asks for the deploy; it needs the repository
 secrets `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` and no SSH key. The
 platform runs `python manage.py migrate` before it switches to the new image.
 
-What the app gets on the server is decided in the `digital-organizing/infra`
-repository, not here: `apps/link-shortener.yml` (the domains it answers on,
+What runs on the server and what the app gets there is decided in the
+`digital-organizing/infra` repository, not here:
+`apps/link-shortener.compose.yml` (the service and its volume),
+`apps/link-shortener.yml` (the domains it answers on,
 its budget, the settings that are not secret) and
 `secrets/daily/link-shortener.prod.yaml` (`SECRET_KEY`, the database
 password). The database arrives as one variable, `DATABASE_URL`.
@@ -40,8 +42,7 @@ password). The database arrives as one variable, `DATABASE_URL`.
 The app is one container. It serves its static files itself (WhiteNoise;
 they are collected into the image at build time) and the uploaded preview
 images from the `media` volume. There is no web server in front of it besides
-the platform's proxy. `compose.deploy.yml` must not publish a port and must
-keep the service name `app`.
+the platform's proxy.
 
 To add a domain the shortener answers on: add it to the app file in the infra
 repository, and create the Domain object in the admin.
