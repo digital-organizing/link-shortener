@@ -117,10 +117,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Hands compose.deploy.yml to the organisation's app platform: the job joins
-  # the tailnet and logs in to the app host through Tailscale SSH, so this
-  # repository holds no SSH key. The platform runs the migrations before it
-  # switches to the new image.
+  # Asks the organisation's app platform for the deploy: the job joins the
+  # tailnet and logs in to the app host through Tailscale SSH, so this
+  # repository holds no SSH key. It hands over no compose file: the stack is in
+  # the infra repository (apps/link-shortener.compose.yml). With id-token the
+  # job proves to the app host which repository it runs in. The platform runs
+  # the migrations before it switches to the new image.
   #
   # These are the steps of the shared workflow
   # digital-organizing/infra/.github/workflows/deploy.yml, copied here: that
@@ -131,14 +133,12 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       packages: read
+      id-token: write
     concurrency:
       group: deploy-link-shortener-prod
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v7
-
       - name: Join the tailnet as a CI node
         uses: tailscale/github-action@v3
         with:
@@ -150,10 +150,15 @@ jobs:
         env:
           APP: link-shortener-prod
           HOST: app-daily
-          REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ github.token }}
         run: |
           address=$(tailscale ip -4 "$HOST")
           run() { ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 "deploy@$address" "$@"; }
-          printf '%s' "$REGISTRY_TOKEN" | run "registry-login ghcr.io $REGISTRY_USER"
-          run "deploy $APP" < compose.deploy.yml
+          # GitHub's word for which repository this job runs in, good for this
+          # host only; the app host deploys an app from its own repository only.
+          oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=app-deploy:$HOST" | jq -r .value)
+          echo "::add-mask::$oidc"
+          # The job's own token, which only lives as long as this run, lets the
+          # server pull the private image.
+          { echo "oidc $oidc"; echo "registry $REGISTRY_TOKEN"; } | run "deploy $APP"
